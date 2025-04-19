@@ -1,5 +1,6 @@
 import json
 import os
+import gc
 
 import torch
 from diffusers import FluxPipeline, FluxTransformer2DModel
@@ -7,6 +8,7 @@ from einops import rearrange
 from torch import nn
 
 import comfy.model_patcher
+import comfy.model_management
 import folder_paths
 from comfy.ldm.common_dit import pad_to_patch_size
 from comfy.supported_models import Flux, FluxSchnell
@@ -105,8 +107,8 @@ class ComfyFluxWrapper(nn.Module):
                     img_ids=img_ids,
                     txt_ids=txt_ids,
                     guidance=guidance if self.config["guidance_embed"] else None,
-                    controlnet_block_samples=None if control is None else control["input"],
-                    controlnet_single_block_samples=None if control is None else control["output"],
+                    controlnet_block_samples=None if control is None else [y.to(x.dtype) for y in control["input"]],
+                    controlnet_single_block_samples=None if control is None else [y.to(x.dtype) for y in control["output"]],
                 ).sample
         else:
             out = model(
@@ -117,8 +119,8 @@ class ComfyFluxWrapper(nn.Module):
                 img_ids=img_ids,
                 txt_ids=txt_ids,
                 guidance=guidance if self.config["guidance_embed"] else None,
-                controlnet_block_samples=None if control is None else control["input"],
-                controlnet_single_block_samples=None if control is None else control["output"],
+                    controlnet_block_samples=None if control is None else [y.to(x.dtype) for y in control["input"]],
+                    controlnet_single_block_samples=None if control is None else [y.to(x.dtype) for y in control["output"]],
             ).sample
 
         out = rearrange(
@@ -143,6 +145,8 @@ class NunchakuFluxDiTLoader:
         self.cpu_offload = None
         self.cache_threshold = None
         self.data_type = None
+        self.patcher = None
+        self.device = comfy.model_management.get_torch_device()
 
     @classmethod
     def INPUT_TYPES(s):
@@ -293,10 +297,16 @@ class NunchakuFluxDiTLoader:
             or self.data_type != data_type
         ):
             if self.transformer is not None:
+                model_size = comfy.model_management.module_size(self.transformer)
                 transformer = self.transformer
                 self.transformer = None
+                transformer.to('cpu')
                 del transformer
-                torch.cuda.empty_cache()
+                gc.collect()
+                comfy.model_management.cleanup_models_gc()
+                comfy.model_management.soft_empty_cache()
+                comfy.model_management.free_memory(model_size, device)
+
             self.transformer = NunchakuFluxTransformer2dModel.from_pretrained(
                 model_path,
                 offload=cpu_offload_enabled,
